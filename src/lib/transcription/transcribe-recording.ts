@@ -456,13 +456,10 @@ async function transcribeRecordingInner(
                         storage,
                         recording.storagePath,
                         ELEVENLABS_MAX_FILE_BYTES,
-                        recording.filesize,
                     );
                 } catch (err) {
                     if (err instanceof DownloadSizeLimitError) {
-                        throw new ElevenLabsFileTooLargeError(
-                            recording.filesize,
-                        );
+                        throw new ElevenLabsFileTooLargeError();
                     }
                     throw err;
                 }
