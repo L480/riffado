@@ -155,4 +155,14 @@ jobs:
 
       - name: Inspect image
         run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          # Reuse the tag docker/metadata-action already computed
+          # (steps.meta.outputs.tags), which it lowercases internally,
+          # instead of re-deriving the reference from `github.repository`
+          # here. `github.repository` preserves the original owner/repo
+          # case, and registries require a lowercase reference -- an
+          # owner name with any uppercase letter (as on a personal fork)
+          # made this step fail with "must be lowercase" even though the
+          # push itself (which goes through metadata-action's tags)
+          # succeeded.
+          image_tag="$(head -n1 <<< "${{ steps.meta.outputs.tags }}")"
+          docker buildx imagetools inspect "$image_tag"
