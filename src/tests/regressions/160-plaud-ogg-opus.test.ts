@@ -86,13 +86,71 @@ import { createUserStorageProvider } from "@/lib/storage/factory";
 import { syncRecordingsForUser } from "@/lib/sync/sync-recordings";
 import { buildAudioFile } from "@/lib/transcription/audio-file";
 import { chatTranscribe } from "@/lib/transcription/chat-transcribe";
-import { ffmpegToOpus, transcodeToMp3 } from "@/lib/transcription/ffmpeg";
+import {
+    ffmpegToOpus,
+    transcodeToMp3,
+    transcodeToMp3Segments,
+} from "@/lib/transcription/ffmpeg";
 
 const FIXTURE = path.join(__dirname, "..", "fixtures", "sample.mp3");
 
-function hasFfmpeg(): boolean {
-    const probe = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
-    return probe.status === 0;
+interface AudioProbe {
+    streams?: Array<{
+        codec_name?: string;
+        sample_rate?: string;
+        channels?: number;
+    }>;
+}
+
+function hasCommand(command: string): boolean {
+    return spawnSync(command, ["-version"], { stdio: "ignore" }).status === 0;
+}
+
+function probeAudio(input: Buffer): AudioProbe {
+    const result = spawnSync(
+        "ffprobe",
+        [
+            "-v",
+            "error",
+            "-select_streams",
+            "a:0",
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels",
+            "-of",
+            "json",
+            "pipe:0",
+        ],
+        { input },
+    );
+    if (result.status !== 0) {
+        throw new Error(result.stderr.toString() || "ffprobe failed");
+    }
+    return JSON.parse(result.stdout.toString()) as AudioProbe;
+}
+
+function decodedDurationSeconds(input: Buffer): number {
+    const result = spawnSync(
+        "ffmpeg",
+        [
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            "pipe:0",
+            "-f",
+            "s16le",
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "pipe:1",
+        ],
+        { input },
+    );
+    if (result.status !== 0) {
+        throw new Error(result.stderr.toString() || "ffmpeg decode failed");
+    }
+    return result.stdout.length / (2 * 16_000);
 }
 
 function oggOpusBytes(): Buffer {
@@ -102,7 +160,9 @@ function oggOpusBytes(): Buffer {
     return buf;
 }
 
-const itIfFfmpeg = hasFfmpeg() ? it : it.skip;
+const itIfFfmpeg = hasCommand("ffmpeg") ? it : it.skip;
+const itIfAudioTools =
+    hasCommand("ffmpeg") && hasCommand("ffprobe") ? it : it.skip;
 
 describe("issue #160 — Plaud .mp3 that is actually Ogg/Opus", () => {
     it("buildAudioFile sniffs Ogg bytes even when the path is .mp3", () => {
@@ -394,14 +454,49 @@ describe("issue #160 — Plaud .mp3 that is actually Ogg/Opus", () => {
         20_000,
     );
 
-    itIfFfmpeg(
-        "transcodeToMp3 writes a real MPEG stream",
+    itIfAudioTools(
+        "transcodeToMp3 writes mono 16 kHz MPEG audio",
         async () => {
             const fixture = await readFile(FIXTURE);
             const ogg = await ffmpegToOpus(fixture, 16);
             const mp3 = await transcodeToMp3(ogg);
+            const stream = probeAudio(mp3).streams?.[0];
+
             expect(sniffAudio(mp3).container).toBe("mp3");
             expect(mp3.length).toBeGreaterThan(0);
+            expect(stream).toMatchObject({
+                codec_name: "mp3",
+                sample_rate: "16000",
+                channels: 1,
+            });
+        },
+        15_000,
+    );
+
+    itIfAudioTools(
+        "transcodeToMp3Segments bounds mono 16 kHz MPEG segments",
+        async () => {
+            const fixture = await readFile(FIXTURE);
+            const segments: Buffer[] = [];
+            for await (const segment of transcodeToMp3Segments(fixture, 0.4)) {
+                segments.push(segment.buffer);
+            }
+
+            expect(segments.length).toBeGreaterThan(1);
+            for (const segment of segments) {
+                const probe = probeAudio(segment);
+                const stream = probe.streams?.[0];
+                expect(sniffAudio(segment).container).toBe("mp3");
+                expect(segment.length).toBeGreaterThan(0);
+                expect(stream).toMatchObject({
+                    codec_name: "mp3",
+                    sample_rate: "16000",
+                    channels: 1,
+                });
+                expect(decodedDurationSeconds(segment)).toBeLessThanOrEqual(
+                    0.5,
+                );
+            }
         },
         15_000,
     );
